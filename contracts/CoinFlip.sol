@@ -1,99 +1,140 @@
-//SPDX-License-Identifier: Unlicense
+// SPDX-License-Identifier: SEE LICENSE IN LICENSE
+pragma solidity 0.8.7;
+
 import "hardhat/console.sol";
-pragma solidity ^0.8.0;
 
 contract CoinFlip {
-    
-    enum Status {PENDING, WON, LOST}
+
+	enum Status {PENDING, WON, LOSE}
     Status public status = Status.PENDING;
 
+	struct Game {
+		uint256 id;
+		address player;
+		uint8 choice;
+		uint256 betAmount;
+		uint256 prize;
+		uint256 result;
+		Status status;
+	}
 
-    struct Game {
-        address player;
-        uint8 choice;
-        uint256 betAmount;
-        uint256 prize;
-        uint256 result;
-        Status status;
-    }
+	mapping(bytes32 => Game) public games;
 
-    mapping(uint256 => Game) public games;
-    
-    uint256 public gamesCount;
-    uint256 public minBet = 0.01 ether;
-    uint256 public maxBet = 10 ether;
-    uint256 public coeff = 195;
-    uint256 public profit;
-    address public owner;
+	address public owner;
+	address public croupie;
+	uint256 public gamesCount;
+	uint256 public minBet = 0.01 ether;
+	uint256 public maxBet = 10 ether;
+	// amount * coeff / 100
+	uint256 public coeff = 195;
+	uint256 public profit = address(this).balance;
 
-    constructor() payable {
-        owner = msg.sender;
-    }
-
-    modifier onlyOwner {
-        require(msg.sender == owner, "Coinflip: Only Owner");
-        _;
-    }
-
-    function setBetRange(uint256 _minBet, uint256 _maxBet) external onlyOwner {
-        require(_maxBet > 0 && _minBet > 0, "Error: Min and Max bets less than 0.");
-        require(_maxBet > _minBet, "Error: Min bet greater than Max bet.");
-        minBet = _minBet;
-        maxBet = _maxBet;
-    }
-
-    function setCoeff(uint256 _coeff) external onlyOwner {
-        require(_coeff > 100, "Error: Coeff less than 100.");
-        coeff = _coeff;
-    }
-
-    function createGame(uint8 _choice) external payable {
-        require(msg.value >= minBet && msg.value <= maxBet, "Error: Bet not in range.");
-        require(_choice == 0 || _choice == 1, "Error: Nonexistent Choice.");
+	event GameCreated(address indexed player, uint256 betAmount, uint8 choice);
+	event GamePlayed(address indexed player, uint256 prize, uint256 choice, uint256 result, Status status);
 
 
-        games[gamesCount] = Game(
-            msg.sender,
-            _choice,
-            msg.value,
-            0,
-            0,
-            Status.PENDING
-        );
-        gamesCount += 1;
-    }
+	constructor() payable{
+		owner = msg.sender;
+		croupie = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8;
+	}
 
-    function play(uint256 _id) external {
-        Game storage game = games[_id];
+	modifier onlyOwner {
+		require(msg.sender == owner, "Coinflip: Only Owner");
+		_;
+	}
 
-        uint256 _result = block.timestamp % 2;
-        console.log(_result);
-        console.log(block.timestamp);
-        game.result = _result;
+	modifier onlyCroupier() {
+		require(msg.sender == croupie, "CoinFlip: Only Croupier");
+		_;
+	}
 
+	modifier onlyUniqueSeed(bytes32 _id) {
+		require(games[_id].id == 0, "CoinFlip: Only unique seed");
+		_;
+	}
 
-        if (game.choice == game.result) {
-            uint256 _prize = game.betAmount * coeff / 100;
-            game.prize = _prize;
-            game.status = Status.WON;
+	function setBetRange(uint256 _minBet, uint256 _maxBet) external onlyOwner {
+		require(_maxBet > 0 && _minBet > 0, "Error: Min and Max bets less than 0");
+		require(_maxBet > _minBet, "Error: Min bet greater than Max bet");
+		minBet = _minBet;
+		maxBet = _maxBet;
+	} 
+
+	function setCoeff(uint256 _coeff) external onlyOwner {
+		require(_coeff > 100, "Error");
+		coeff = _coeff;
+	}
+
+	// "game1" * private key -> hash = seed
+	// seed & public key  -> _v, _r, _s -> public key  
+
+	function play(uint8 choice, bytes32 seed) external payable onlyUniqueSeed(seed){
+		require(choice == 0 || choice == 1, "CoinFlip: Choice only 0 or 1");
+		require(msg.value >= minBet && msg.value <= maxBet, "CoinFlip: only bet in range");
+
+		uint256 possiblePrize = msg.value * coeff / 100;
+		require(profit >= possiblePrize, "CoinFlip: not enought balance on contract");
+
+		gamesCount++;
+		profit += msg.value;
+
+		// Game storage game = games[seed];
+		// game.id = gamesCount;
+		// game.player = msg.sender;
+		// game.choice = choice;
+		// game.prize = 0;
+		// game.result = 0; 
+		// game.status = Status.PENDING;
+
+		games[seed] = Game(
+			gamesCount,
+			msg.sender,
+			choice,
+			msg.value,
+			0,
+			0,
+			Status.PENDING
+		);
+
+		emit GameCreated(msg.sender, msg.value, choice);
+	
+	}
+
+	function confirm(bytes32 seed, uint8 _v, bytes32 _r, bytes32 _s) external {		
+		bytes memory prefix = "\x19Ethereum Signed Message:\n32";
+		bytes32 prefixedHash = keccak256(abi.encodePacked(prefix, seed));
+	
+		require(ecrecover(prefixedHash, _v, _r, _s) == croupie, "Invalid sign");
+	
+		uint256 result = uint256(_s) % 2;
+        
+
+		Game storage game = games[seed];
+
+		if (game.choice == result) {
+			
+			game.status = Status.WON;
             status = Status.WON;
+			game.result = result;
+			game.prize = game.betAmount * coeff / 100;
+			
+			profit -= game.prize;
 
-            payable(game.player).transfer(_prize);
-        } else {
-            game.status = Status.LOST;
-            status = Status.LOST;
+			payable(game.player).transfer(game.prize);
+		} else {
+			game.status = Status.LOSE;
+            status = Status.LOSE;
+			game.result = result;
+			
+			profit += game.betAmount;
+		}
 
-            profit += game.betAmount;
-        }
-    }
+		emit GamePlayed(game.player, game.prize, game.choice, game.result, game.status);
+	}
 
-    function withdraw(uint256 _amount) external onlyOwner {
-        require(address(this).balance >= _amount, "Error: Not enough balance.");
-        profit -= _amount;
-        payable(msg.sender).transfer(_amount);
-    }
-
-
-
-
+	function withdraw(uint256 _amount) external onlyOwner {
+		require(_amount <= address(this).balance, "Error");
+		profit -= _amount;
+		payable(msg.sender).transfer(_amount);
+	}
 }
